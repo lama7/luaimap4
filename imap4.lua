@@ -66,6 +66,8 @@ if not socket then
             interpreter.]])
 end
 local ssl = require("ssl")
+local mime = require("mime")
+local md5 = require("md5")
 
 --local __debug__ = print
 local __debug__ = function() end
@@ -106,6 +108,7 @@ local AUTHENTICATED = { [AUTH] = 1, [SELECT] = 1}
 local SELECTED = { [SELECT] = 1 }
 local ALLOWED_STATES = {
                         APPEND = AUTHENTICATED,
+                        AUTHENTICATE = NOT_AUTHENTICATED,
                         CAPABILITY = UNIVERSAL,
                         CHECK = SELECTED,
                         CLOSE = SELECTED,
@@ -230,7 +233,39 @@ local function arg_error(argt, literals)
     error(err_msg)
 end
 
+--[[
+    Authentication Table
 
+    This table contains the supported authenication mechanisms.  It consists of
+    a mechanism as the key and then a function which takes a table as an
+    argument and returns a function that that takes a server response as an
+    argument.  No pre-processing of server responses is done prior to calling
+    the function.
+
+    The server response processing function should return 2 values: a string to
+    be sent as the client response to the server, and a function to respond to
+    subsequent server responses.  If none are expected, then return 'nil'.
+--]]
+AUTH_T = { ['CRAM-MD5'] = function(argt)
+                          return function (s_resp)
+                                     local key = argt['pw']
+                                     local user = argt['user']
+                                     local text = mime.unb64(s_resp)
+
+                                     if #key > 64 then key = md5.sum(key) end
+                                     if #key < 64 then 
+                                         key = key..string.char(0):rep(64-#key)
+                                     end
+                                     local ixor = md5.exor(key,
+                                             string.char(54):rep(64))
+                                     local oxor = md5.exor(key,
+                                             string.char(92):rep(64))
+                                     local digest =
+                                                   md5.sumhexa(oxor..md5.sum(ixor..text))
+                                     return mime.b64(user.." "..digest), nil
+                                 end
+                      end
+         }
 
 
 --[[
@@ -699,25 +734,31 @@ function IMAP4.__send_command(self, tag, cmd, args)
 end
 
 function IMAP4.__send_continuation(self)
-    local arg
-    local flag
-    local out = self.__literals[1]
-    table.remove(self.__literals, 1)
-    if #self.__argt ~= 0 then
-        repeat
-            arg = self.__argt[1][1]
-            flag = self.__argt[1][3]
-            table.remove(self.__argt, 1)
-        until arg ~= ' ' 
-        if arg ~= '' then
-            if flag == 'l' then
-                table.insert(self.__literals, arg)
-            else 
-                out = out.." "..arg 
+    local out
+    if self.__literal_func then
+        out, self.__literal_func =
+                  self.__literal_func(self.__current_response:getContinuation())
+    else
+        local arg
+        local flag
+        out = self.__literals[1]
+        table.remove(self.__literals, 1)
+        if #self.__argt ~= 0 then
+            repeat
+                arg = self.__argt[1][1]
+                flag = self.__argt[1][3]
+                table.remove(self.__argt, 1)
+            until arg ~= ' ' 
+            if arg ~= '' then
+                if flag == 'l' then
+                    table.insert(self.__literals, arg)
+                else 
+                    out = out.." "..arg 
+                end
             end
         end
+        if #self.__literals ~= 0 then out = out.." "..self:__add_literal() end
     end
-    if #self.__literals ~= 0 then out = out.." "..self:__add_literal() end
     assert(self.__connection:send(out..CRLF))
 end
 
@@ -859,15 +900,14 @@ end
     PUBLIC METHODS
 
 --]]
-function IMAP4.append(self, mb_name, msg_literal, opt_flags, opt_datetime, 
-                                                                      literals)
+function IMAP4.append(self, mb_name, msg_literal, opt_flags, opt_datetime)
     --[[
         Sends an IMAP4Rev1 APPEND command.  Please note that using the `literals`
         argument may not provide the expected result with some servers.  The
         best way to get the desired result is to use the named arguments.
     --]]
     self:__check_args({'mb_name', 'opt_flags', 'opt_datetime', 'msg_literal'},
-                      literals, 
+                      nil, 
                       { mb_name or '',
                         "You must supply a mailbox name when using 'APPEND'"},
                       { msg_literal or '',
@@ -877,6 +917,24 @@ function IMAP4.append(self, mb_name, msg_literal, opt_flags, opt_datetime,
     table.insert(self.__argt, 2, { opt_flags or ' ', '', '()'} )
     table.insert(self.__argt, 3, { opt_datetime or ' ', '' } )
     return self:__synchronous_cmd('APPEND', self:__build_arg_str())
+end
+
+function IMAP4.authenticate(self, auth_mech, argt)
+    --[[
+        `auth_mech` is the text that appears after the "AUTH=" in server
+        capabilities
+        `argt` is a key-value table used to create a closure over the
+        authenticating function
+    --]]
+    assert(md5, [[The md5 library for lua is not installed.  Please install it
+                  in order to make use of CRAM-MD5 authentication.]])
+    local auth_func =  assert(AUTH_T[auth_mech], 
+                              "Authorization type not supported.")
+    self.__literal_func = auth_func(argt)
+
+    local r = self:__synchronous_cmd('AUTHENTICATE', " "..auth_mech)
+    if r:getTaggedResult() == 'OK' then self.__state = AUTH end
+    return r
 end
 
 function IMAP4.capability(self)
