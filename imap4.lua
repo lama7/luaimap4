@@ -233,10 +233,35 @@ local function arg_error(argt, literals)
     error(err_msg)
 end
 
+function cram_md5(argt)
+    --[[
+        Implementation of cram-md5 authentication as described in RFC2195.  The
+        technique is based off of the algorithm described in RFC2104.
+
+        This returns a closure using elements of `argt` as the upvalues.  The
+        returned function performs the necessary calculations and returns a
+        response string for the server response `s_resp` and `nil` to signify no
+        further server processing is expected.
+    --]]
+    return function (s_resp)
+               local key = argt['pw']
+               local user = argt['user']
+               local text = mime.unb64(s_resp)
+
+               if #key > 64 then key = md5.sum(key) end
+               if #key < 64 then key = key..string.char(0):rep(64-#key)
+               end
+               local ixor = md5.exor(key, string.char(54):rep(64))
+               local oxor = md5.exor(key, string.char(92):rep(64))
+               local digest = md5.sumhexa(oxor..md5.sum(ixor..text))
+               return mime.b64(user.." "..digest), nil
+           end
+end
+
 --[[
     Authentication Table
 
-    This table contains the supported authenication mechanisms.  It consists of
+    This table contains the supported authentication mechanisms.  It consists of
     a mechanism as the key and then a function which takes a table as an
     argument and returns a function that that takes a server response as an
     argument.  No pre-processing of server responses is done prior to calling
@@ -246,26 +271,9 @@ end
     be sent as the client response to the server, and a function to respond to
     subsequent server responses.  If none are expected, then return 'nil'.
 --]]
-AUTH_T = { ['CRAM-MD5'] = function(argt)
-                          return function (s_resp)
-                                     local key = argt['pw']
-                                     local user = argt['user']
-                                     local text = mime.unb64(s_resp)
-
-                                     if #key > 64 then key = md5.sum(key) end
-                                     if #key < 64 then 
-                                         key = key..string.char(0):rep(64-#key)
-                                     end
-                                     local ixor = md5.exor(key,
-                                             string.char(54):rep(64))
-                                     local oxor = md5.exor(key,
-                                             string.char(92):rep(64))
-                                     local digest =
-                                                   md5.sumhexa(oxor..md5.sum(ixor..text))
-                                     return mime.b64(user.." "..digest), nil
-                                 end
-                      end
-         }
+local AUTH_T = { 
+                ['CRAM-MD5'] = cram_md5
+               }
 
 
 --[[
@@ -902,9 +910,10 @@ end
 --]]
 function IMAP4.append(self, mb_name, msg_literal, opt_flags, opt_datetime)
     --[[
-        Sends an IMAP4Rev1 APPEND command.  Please note that using the `literals`
-        argument may not provide the expected result with some servers.  The
-        best way to get the desired result is to use the named arguments.
+        Sends an IMAP4Rev1 APPEND command.
+
+        Does NOT support the `literals` form of the command since a literal is
+        used as the final component of the command
     --]]
     self:__check_args({'mb_name', 'opt_flags', 'opt_datetime', 'msg_literal'},
                       nil, 
