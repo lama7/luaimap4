@@ -67,6 +67,7 @@ if not socket then
 end
 local ssl = require("ssl")
 local auth = require("auth")
+local utils = require("utils")
 
 --local __debug__ = print
 local __debug__ = function() end
@@ -133,104 +134,11 @@ local ALLOWED_STATES = {
                         UNSUBSCRBE = AUTHENTICATED,
                        }
 
--- UID Command tables
-local copy_args = {}
-local fetch_args = {}
-local store_args = {}
-local search_args = {}
-
 -- String Patterns
 local RESPONSE_TYPES_PAT = {"^(%*) ", "^(%+) ", "^(%a%d+) "}
 local CONTINUE_PAT = "(.*)\r\n"
 local RESPONSE_PAT1 = "^(%u+) (.*)\r\n"
 local RESPONSE_PAT2 = "^(%d+) (%u+) ?(.*)\r\n"
-
---[[
- 
-    MISCELLANEOUS FUNCTIONS
- 
---]]
-local function keys(t)
-    --[[
-        Returns table of non-numeric key values in a table.
-
-        Arguments:
-            t:  any table
-
-        Returns:
-            Table of non-numeric(index?) key values
-    --]]
-    if not t then return nil end
-    local key_t = {}
-    for k in pairs(t) do 
-        if type(k) ~= 'number' then 
-            table.insert(key_t, k) 
-        end
-    end
-    return key_t
-end
-
-local function issubset(t1, t2)
-    --[[
-        Return true if t1 is a subset of t2, works only for indexed tables
-
-        Arguments:
-            t1:  indexed table
-            t2:  indexed table that establishes the set
-
-        Returns:
-            true if t1 is a subset of t2, false otherwise
-    --]]
-    if not t1 then return true end
-    local set_t = {}
-    for i,v in ipairs(t2) do set_t[v] = true end
-    for i,v in ipairs(t1) do 
-        if not set_t[v] then return false end
-    end
-    return true
-end
-
-local function makeordered(t, order)
-    --[[
-        Returns a table whose values come from a key-value table and in a
-        specified order.
-
-        Arguments:
-            t: a key-value based table
-
-            order: a table which lists the keys of table 't' in the order they
-                   should be inserted into the return table
-
-        Returns:
-            Indexed table whose values are those of table 't' and is ordered
-            according to the key order specified in 'order' or nil if t is nil
-    --]]
-    if not t then return t end
-    local new_t = {}
-    for i,v in ipairs(order) do
-        if t[v] then table.insert(new_t, t[v]) end
-    end
-    if #new_t ~= 0 then 
-        return new_t 
-    else
-        return t
-    end
-end
-
-local function arg_error(argt, literals)
-    local err_msg = ''
-    local literal_i = 1
-    for i,v in ipairs(argt) do
-        if v[1] == ''  then
-            if literals and not literals[literal_i] then
-                err_msg = err_msg..v[1]..CRLF
-            else
-                literal_i = literal_i + 1
-            end
-        end
-    end
-    error(err_msg)
-end
 
 --[[
     Response Object
@@ -416,7 +324,7 @@ function Response.getResponseCodes(self)
                   dependent response codes are not included here.
     --]]
     if self.__codes then
-        return keys(self.__codes)
+        return utils.keys(self.__codes)
     else
         return nil
     end
@@ -447,7 +355,7 @@ function Response.getUntaggedResponse(self)
         Return:  A table of with all response codes received in the response.
     --]]
     if next(self.__untagged) then
-        return keys(self.__untagged)
+        return utils.keys(self.__untagged)
     else
         return nil
     end
@@ -810,9 +718,9 @@ function IMAP4.__check_args(self, cmdargs, literals, ...)
     local n_literals = 0
     local named_args = 0
     if literals then 
-        assert(issubset(keys(literals), cmdargs), 
+        assert(utils.issubset(utils.keys(literals), cmdargs), 
                "Invalid literal key in literals")
-        literals = makeordered(literals, cmdargs)
+        literals = utils.makeordered(literals, cmdargs)
         n_literals = #literals 
     end
     for i,v in ipairs(named_argt) do
@@ -826,7 +734,7 @@ function IMAP4.__check_args(self, cmdargs, literals, ...)
             error("Too many command args provided")
         end
     elseif named_args + n_literals ~= n_args then
-        arg_error(named_argt, literals)
+        utils.arg_error(named_argt, literals)
     end
     self.__literals = literals or {}
     self.__argt = named_argt
