@@ -1,4 +1,3 @@
-#!/usr/bin/env lua
 --[[
 Copyright (c) <2010> <Gerry LaMontagne>
 
@@ -1115,6 +1114,6 @@ function IMAP4.new(self, hostname, port)
 end
 
 -- export the objects
-imaplib = { IMAP4 = IMAP4, 
-            Response = Response }
-return imaplib
+imap4 = { IMAP4 = IMAP4, 
+          Response = Response }
+return imap4
