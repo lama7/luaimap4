@@ -34,12 +34,14 @@ local path = "./imap4/"
 
 -- define a loader function that can load a file from a known spot
 local function loader(modulename)
-       local filename = path..modulename..".lua"
-       -- IMPORTANT: loadfile compiles the code in 'filename' and returns a
-       --            function.  In order to *define* the function, it has to
-       --            executed- then the module will be available.
-       return assert(loadfile(filename)())
-       end
+    local filename = path..modulename..".lua"
+    -- IMPORTANT: loadfile compiles the code in 'filename' and returns a
+    --            function.  In order to *define* the function, it has to
+    --            executed- then the module will be available.
+    local m = assert(loadfile(filename))
+    return m()
+
+end
 
 -- assign preload values for the helper modules that 'imap4' uses, we do this
 -- because those modules are not in the module search path for lua since we 

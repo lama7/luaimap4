@@ -1,18 +1,19 @@
 #!/usr/bin/env lua
 
+package.path = "./?/init.lua;"..package.path
+
 if not arg[1] and not arg[2] and not arg[3] then
     print("Usage: test.lua mailserver username password")
     return
 end
 
-package.path = "./?/init.lua;"..package.path
-
 local imaplib = require("imap4")
+
 local message = "Date: Mon, 7 Feb 1994 21:52:25 -0800 (PST)\r\nFrom: Fred Foobar<foobar@Blurdybloop.COM>\r\nSubject: afternoon meeting\r\nTo:mooch@owatagu.siam.edu\r\nMessage-Id:<B27397-0100000@Blurdybloop.COM>\r\nMIME-Version: 1.0\r\nContent-Type:TEXT/PLAIN; CHARSET=US-ASCII\r\n\r\nHello Joe, do you think we can meet at 3:30 tomorrow?"
 
-imap = imaplib.IMAP4:new(arg[1])
+local imap = imaplib.IMAP4:new(arg[1])
 imap.__welcome:__print()
-r = imap:capability()
+local r = imap:capability()
 r:__print()
 r = imap:NOOP()
 r:__print()

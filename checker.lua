@@ -34,7 +34,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --]]
 
-package.path = "./?/.init.lua;"..package.path
+package.path = "./?/init.lua;"..package.path
 
 if not arg[1] and not arg[2] and not arg[3] then
     print("Usage: checker.lua mailserver username password")
