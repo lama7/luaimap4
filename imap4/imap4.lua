@@ -135,7 +135,6 @@ local ALLOWED_STATES = {
 
 -- String Patterns
 local RESPONSE_TYPES_PAT = {"^(%*) ", "^(%+) ", "^(%a%d+) "}
-local CONTINUE_PAT = "(.*)\r\n"
 local RESPONSE_PAT1 = "^(%u+) (.*)\r\n"
 local RESPONSE_PAT2 = "^(%d+) (%u+) ?(.*)\r\n"
 
@@ -612,22 +611,30 @@ function IMAP4.__send_continuation(self)
     else
         local arg
         local flag
-        out = self.__literals[1]
+        out = self.__literals[1]  -- this is the literal we've already informed 
+                                  -- the server about
         table.remove(self.__literals, 1)
+
+        -- since we allow for mixing of literals and named arguments, we need
+        -- to check if anything follows this literal and if so, append those
+        -- arguments,  it's also possible that more literals follow this one
         if #self.__argt ~= 0 then
+            -- clean up the __argt of optional entries
             repeat
                 arg = self.__argt[1][1]
                 flag = self.__argt[1][3]
                 table.remove(self.__argt, 1)
             until arg ~= ' ' 
             if arg ~= '' then
-                if flag == 'l' then
-                    table.insert(self.__literals, arg)
-                else 
+                if flag ~= 'l' then
                     out = out.." "..arg 
+                else   
+                    table.insert(self.__literals, arg)
                 end
             end
         end
+        -- be sure to add length of next literal if there are subsequent
+        -- literals to send
         if #self.__literals ~= 0 then out = out.." "..self:__add_literal() end
     end
     assert(self.__connection:send(out..CRLF))
@@ -641,7 +648,7 @@ function IMAP4.__synchronous_cmd(self, cmd, args)
     self:__new_response()
     self:__send_command(tag, cmd, args)
     repeat
-        local rtype = self:__get_response(tag)
+        local rtype = self:__get_response()
         if rtype == '+' then
             self:__send_continuation()
         end
@@ -716,12 +723,17 @@ function IMAP4.__check_args(self, cmdargs, literals, ...)
     local maxargs = #cmdargs
     local n_literals = 0
     local named_args = 0
+
+    -- process the literals table- if keyed, make sure keys are valid for 
+    -- this command and then put them in the proper order for the command
     if literals then 
         assert(utils.issubset(utils.keys(literals), cmdargs), 
                "Invalid literal key in literals")
         literals = utils.makeordered(literals, cmdargs)
         n_literals = #literals 
     end
+    -- check if the proper number of arguments have been supplied for the 
+    -- current command
     for i,v in ipairs(named_argt) do
         if v[1] ~= '' then named_args = named_args + 1 end
     end
@@ -735,19 +747,28 @@ function IMAP4.__check_args(self, cmdargs, literals, ...)
     elseif named_args + n_literals ~= n_args then
         utils.arg_error(named_argt, literals)
     end
+    -- make object assignments prior to return
     self.__literals = literals or {}
     self.__argt = named_argt
 end
 
 function IMAP4.__build_arg_str(self)
     local arg_str = ''
+    -- loop to process argument entries in __argt
     while #self.__argt ~= 0 do
         local arg = self.__argt[1][1]
         local flag = self.__argt[1][3]
         table.remove(self.__argt, 1)
+        -- check if this is an optional argument that should NOT be used as a
+        -- literal, do nothing if so
         if arg ~= ' ' then 
-            if arg ~= '' then
-                if flag =='l' then
+            if arg ~= '' then  -- check if arg is being sent as literal
+                -- now process argument flags- these modify the arguments to
+                -- handle the idicosynchracies of certain command arguments.
+                -- For instance, the APPEND command takes a literal as its 2nd
+                -- argument so if it is passed in a as a normal named argument
+                -- it must still go out as a literal
+                if flag == 'l' then 
                     table.insert(self.__literals, arg)
                     arg_str = arg_str..' '..self:__add_literal()
                     break
