@@ -27,6 +27,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --]]
 
+local table = require("table")
+
 local function keys(t)
     --[[
         Returns table of non-numeric key values in a table.
