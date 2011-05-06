@@ -72,15 +72,26 @@ chk_result(imap:LOGIN(arg[2], arg[3]))
 
 print("Checking for new mail...")
 r = chk_result(imap:LIST('""', '*'))  -- list of all mailboxes
-local tag
+local firsttag
+local lasttag
 imap:startPipeline()
 for i,v in ipairs(r:getUntaggedContent('LIST')) do
     local mb = v:match([[.* %"(.-)%"$]])
-    tag = imap:STATUS(mb, 'UNSEEN')
+    lasttag = imap:STATUS(mb, 'UNSEEN')
+    if i == 1 then firsttag = lasttag end
 end
 imap:endPipeline()
 
-for r in imap:readResponses(tag) do
+for r in imap:readResponses(lasttag) do
+    local mbstat = r:getUntaggedContent('STATUS')[1] 
+    local mb, newmail = mbstat:match([[^%"(.-)%"%s+%(UNSEEN (%d+)%)$]])
+    if newmail ~= '0' then
+        print(string.format("\t%s:\t%u", mb, newmail))
+    end
+end
+
+-- now repeat using firsttag
+for r in imap:readResponses(lasttag, firsttag) do
     local mbstat = r:getUntaggedContent('STATUS')[1] 
     local mb, newmail = mbstat:match([[^%"(.-)%"%s+%(UNSEEN (%d+)%)$]])
     if newmail ~= '0' then

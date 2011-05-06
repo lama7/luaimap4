@@ -1119,16 +1119,34 @@ function IMAP4.endPipeline(self)
     self.__pipeline = false
 end
 
-function IMAP4.readResponses(self, last_tag)
+function IMAP4.readResponses(self, last_tag, first_tag)
     -- the basic logic- return responses that are queued, if none are 
     -- queued, then read then in from the line until we get a break
     -- continue doing this until all responses have been returned to caller
     -- it is implemented as an iterator so responses can be processed in a 
     -- loop by the caller
-    local response_index = table.getn(self.__responses)
+    local response_index
+    if first_tag then
+        if not self.__tags[first_tag] then
+            error("Invalid tag used in readResponses")
+        end
+        for i, r in ipairs(self.__responses) do
+            if r:getTaggedTag() == first_tag then
+                response_index = i
+                break
+            end
+        end
+        if not response_index then
+            error("Tag not found in __responses.")
+        end
+    else
+        response_index = table.getn(self.__responses)
+    end
+
     return function ()
                local flags = 0
-               -- since we're 
+               -- if we returned the final tag on the previous iteration,
+               -- then we're done and response_index will be nil
                if not response_index then
                    return nil
                end
@@ -1155,6 +1173,10 @@ function IMAP4.readResponses(self, last_tag)
                    end --while...
                end
 
+               -- nwo handle the index- assign nil if we're at the last tag
+               -- it wasn't obvious how else to determine to terminate loop
+               -- iteration since we don't know ahead of time how many 
+               -- responses we'll get
                if tag == last_tag then
                    response_index = nil
                else
