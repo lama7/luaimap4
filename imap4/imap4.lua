@@ -134,7 +134,11 @@ local ALLOWED_STATES = {
                        }
 
 -- String Patterns
-local RESPONSE_TYPES_PAT = {"^(%*) ", "^(%+) ", "^(%a%d+) "}
+local TAG_PAT = "%a%d+"
+local RESPONSE_UNTAGGED = "^(%*) "
+local RESPONSE_CONTINUE = "^(%+) "
+local RESPONSE_TAGGED = "^(%a%d+) "
+local RESPONSE_TYPES_PAT = {RESPONSE_UNTAGGED, RESPONSE_CONTINUE, RESPONSE_TAGGED}
 local RESPONSE_PAT1 = "^(%u+) (.*)\r\n"
 local RESPONSE_PAT2 = "^(%d+) (%u+) ?(.*)\r\n"
 
@@ -482,6 +486,7 @@ end
 --]]
 local IMAP4 = {}
 local RECEIVE_SIZE = 4096
+local NOWAIT = 1
 -- The following makes IMAP4 table usable as an object and allows for using the 
 -- IMAP methods as all caps. 
 -- For example: 
@@ -504,7 +509,35 @@ function IMAP4.__open_connection(self)
     self.__connection:settimeout(0)
 end
 
-function IMAP4.__receive(self)
+function IMAP4.__get_type(self, s)
+    for i, re in ipairs(RESPONSE_TYPES_PAT) do
+        local m = s:match(re)
+        if m then
+            -- The 2 below is needed because indexing starts at 1, plus a 
+            -- ' ' always follows the response identifier contained in m
+            s = s:sub(2+#m, -1)
+            return m, s
+        end
+    end
+    error("Invalid server response: " .. s)
+end
+
+function IMAP4.__add_literal(self)
+    return string.format("{%u}", #self.__literals[1])
+end
+
+function IMAP4.__next_tag(self)
+    self.__tag_num = self.__tag_num + 1
+    return string.format("%s%04u", self.__tagpre, self.__tag_num)
+end
+
+function IMAP4.__new_response(self)
+    self.__current_response = Response:new()
+    table.insert(self.__responses, self.__current_response)
+    return self.__current_response
+end
+
+function IMAP4.__receive(self, flags)
     --[[
         Buffers data in `__received_data` and returns as soon as data is
         available.
@@ -513,15 +546,14 @@ function IMAP4.__receive(self)
         local data, emsg, partial = self.__connection:receive(RECEIVE_SIZE)
         if data then self.__received_data = self.__received_data..data end
         if partial then self.__received_data = self.__received_data..partial end
-        if emsg == 'timeout' and #self.__received_data ~= 0 then
-            return
-        elseif emsg == 'wantread' then
-            -- 'wantread' is a timeout indicator for an SSL/TLS connection 
-            if not data and not partial then
-                socket.select({ self.__connection }, nil)
-            else
+        if emsg == 'timeout' or emsg == 'wantread' then 
+            if #self.__received_data ~= 0 or flags == NOWAIT then
                 return
-            end 
+            else
+                -- rather than spinning our wheels, wait for socket status to
+                -- change
+                socket.select({ self.__connection }, nil)
+            end
         elseif emsg == 'closed' then
             if #self.__received_data == 0 then
                 error('Remote closed connection unexpectedly.')
@@ -548,24 +580,31 @@ function IMAP4.__read(self, cnt)
     return ret_str
 end
 
-function IMAP4.__readline(self)
+function IMAP4.__readline(self, flags)
     --[[
         Return a CRLF terminated string from the receive buffer.  If no CRLF
         exists in the buffer, then read until there is.
     --]]
     local line = ''
     while #self.__received_data == 0 and not self.__received_data:find(CRLF) do
-        self:__receive()
+        self:__receive(flags)
+        -- only iterate once if NOWAIT
+        if flags == NOWAIT then break end
     end
+
+    -- if the NOWAIT flag is set, then it's possible that no data is in the 
+    -- buffer, if this is the case, then just return nil otherwise the ensuing
+    -- assignment wacks __received_data because the match returns nil
+    if #self.__received_data == 0 then return nil end
 
     -- IMAP4 spec states all responses must end in CRLF
     line, self.__received_data = self.__received_data:match("(.-\r\n)(.*)")
     return line
 end
 
-function IMAP4.__get_response(self)
+function IMAP4.__get_response(self, flags)
     __debug__("__get_response")
-    local resp = self:__readline()
+    local resp = self:__readline(flags)
     if not resp then return nil end
 
     local r_type, s = self:__get_type(resp)
@@ -592,15 +631,16 @@ function IMAP4.__get_response(self)
     return r_type
 end
 
+function IMAP4.__buildcmd(self, cmd, args)
+    local cmdstr = ''
+    if args then cmdstr = cmd..args
+    else cmdstr = cmd end
+    return cmdstr..CRLF
+end
+
 function IMAP4.__send_command(self, tag, cmd, args)
-    local out = ''
-    if args then
-        out = cmd..args
-    else
-        out = cmd
-    end
-    self.__tags[tag] = out
-    assert(self.__connection:send(tag..' '..out..CRLF))
+    self.__tags[tag] = self:__buildcmd(cmd, args)
+    assert(self.__connection:send(tag..' '..self.__tags[tag]))
 end
 
 function IMAP4.__send_continuation(self)
@@ -640,11 +680,23 @@ function IMAP4.__send_continuation(self)
     assert(self.__connection:send(out..CRLF))
 end
 
-function IMAP4.__synchronous_cmd(self, cmd, args)
+function IMAP4.__do_cmd(self, cmd, args)
     states = assert(ALLOWED_STATES[cmd], "Invalid command requested: "..cmd)
     assert(states[self.__state], 
            "Command '"..cmd.."' not valid in "..self.__state.." state.")
     local tag = self:__next_tag()
+    if self.__pipeline then
+        -- Pipelined commands are built up and sent out as one transmission to
+        -- the server.  So we'll need to get a tag and build the command as if
+        -- we are sending it out, but instead stuff it in a buffer rather than
+        -- transmit it.  As a courtesy to the caller, we'll return the tag and
+        -- the appended command string so they can do process as they see fit
+        cmd = self:__buildcmd(cmd, args)
+        self.__tags[tag] = cmd
+        self.__pipelined_cmds = self.__pipelined_cmds..tag..' '..cmd
+        return tag, cmd
+    end
+    -- synchronous processing mean we sent the command and wait for the result
     self:__new_response()
     self:__send_command(tag, cmd, args)
     repeat
@@ -654,34 +706,6 @@ function IMAP4.__synchronous_cmd(self, cmd, args)
         end
     until rtype == tag
 
-    return self.__current_response
-end
-
-function IMAP4.__get_type(self, s)
-    for i, re in ipairs(RESPONSE_TYPES_PAT) do
-        local m = s:match(re)
-        if m then
-            -- The 2 below is needed because indexing starts at 1, plus a 
-            -- ' ' always follows the response identifier contained in m
-            s = s:sub(2+#m, -1)
-            return m, s
-        end
-    end
-    error("Invalid server response: " .. s)
-end
-
-function IMAP4.__add_literal(self)
-    return string.format("{%u}", #self.__literals[1])
-end
-
-function IMAP4.__next_tag(self)
-    self.__tag_num = self.__tag_num + 1
-    return string.format("%s%04u", self.__tagpre, self.__tag_num)
-end
-
-function IMAP4.__new_response(self)
-    self.__current_response = Response:new()
-    table.insert(self.__responses, self.__current_response)
     return self.__current_response
 end
 
@@ -809,7 +833,7 @@ function IMAP4.append(self, mb_name, msg_literal, opt_flags, opt_datetime)
 
     table.insert(self.__argt, 2, { opt_flags or ' ', '', '()'} )
     table.insert(self.__argt, 3, { opt_datetime or ' ', '' } )
-    return self:__synchronous_cmd('APPEND', self:__build_arg_str())
+    return self:__do_cmd('APPEND', self:__build_arg_str())
 end
 
 function IMAP4.authenticate(self, auth_mech, argt)
@@ -826,21 +850,21 @@ function IMAP4.authenticate(self, auth_mech, argt)
                               "Authorization type not supported.")
     self.__literal_func = auth_func(argt)
 
-    local r = self:__synchronous_cmd('AUTHENTICATE', " "..auth_mech)
+    local r = self:__do_cmd('AUTHENTICATE', " "..auth_mech)
     if r:getTaggedResult() == 'OK' then self.__state = AUTH end
     return r
 end
 
 function IMAP4.capability(self)
-    return self:__synchronous_cmd('CAPABILITY')
+    return self:__do_cmd('CAPABILITY')
 end
 
 function IMAP4.check(self)
-    return self:__synchronous_cmd('CHECK')
+    return self:__do_cmd('CHECK')
 end
 
 function IMAP4.close(self)
-    local r = self:__synchronous_cmd('CLOSE')
+    local r = self:__do_cmd('CLOSE')
     if r:getTaggedResult() == 'OK' then self.__state = AUTH end
     return r
 end
@@ -852,7 +876,7 @@ function IMAP4.copy(self, seq_set, mb_name, literals)
                         "You must supply a sequence set when using 'COPY'" },
                       { mb_name or '',
                         "You must supply a mailbox name when using 'COPY'" } )
-    return self:__synchronous_cmd('COPY', self:_build_arg_str())
+    return self:__do_cmd('COPY', self:_build_arg_str())
 end
 
 function IMAP4.create(self, mb_name, literals)
@@ -861,7 +885,7 @@ function IMAP4.create(self, mb_name, literals)
                       { mb_name or '', 
                         "You must supply a mailbox name when using 'CREATE'" } )
     local mb_name = self:__build_arg_str()
-    return self:__synchronous_cmd('CREATE', mb_name)
+    return self:__do_cmd('CREATE', mb_name)
 end
 
 function IMAP4.delete(self, mb_name, literals)
@@ -870,7 +894,7 @@ function IMAP4.delete(self, mb_name, literals)
                       { mb_name or '', 
                         "You must supply a mailbox name when using 'DELETE'" } )
     local mb_name = self:__build_arg_str()
-    return self:__synchronous_cmd('DELETE', mb_name)
+    return self:__do_cmd('DELETE', mb_name)
 end
 
 function IMAP4.examine(self, mb_name, literals)
@@ -878,7 +902,7 @@ function IMAP4.examine(self, mb_name, literals)
                       literals,
                       { mb_name or 'INBOX', '' } )
     local mb = self:__build_arg_str()
-    local r = self:__synchronous_cmd('EXAMINE', mb)
+    local r = self:__do_cmd('EXAMINE', mb)
     if r:getTaggedResult() == 'OK' then
         self.__state = SELECT
     else
@@ -888,7 +912,7 @@ function IMAP4.examine(self, mb_name, literals)
 end
 
 function IMAP4.expunge(self)
-    return self:__synchronous_cmd('EXPUNGE')
+    return self:__do_cmd('EXPUNGE')
 end
 
 function IMAP4.fetch(self, seq_set, data, literals)
@@ -898,7 +922,7 @@ function IMAP4.fetch(self, seq_set, data, literals)
                        "You must provide a sequence set to fetch"},
                       {data or '',
                        "You must provide data times to fetch from messages" } )
-    return self:__synchronous_cmd('FETCH', self:__build_arg_str())
+    return self:__do_cmd('FETCH', self:__build_arg_str())
 end
 
 function IMAP4.list(self, reference, mb_pattern, literals)
@@ -906,7 +930,7 @@ function IMAP4.list(self, reference, mb_pattern, literals)
                       literals,
                       { reference or '""', '' },
                       { mb_pattern or '*', '' } )
-    return self:__synchronous_cmd('LIST', self:__build_arg_str())
+    return self:__do_cmd('LIST', self:__build_arg_str())
 end
 
 function IMAP4.login(self, user, pw, literals)
@@ -914,14 +938,14 @@ function IMAP4.login(self, user, pw, literals)
                    { user or '', "You must supply a username to login with." },
                    { pw or '', "You must supply a password to login with. " })
     args = self:__build_arg_str()
-    local r = self:__synchronous_cmd('LOGIN', args)
+    local r = self:__do_cmd('LOGIN', args)
     if r:getTaggedResult() == 'OK' then self.__state = AUTH end
     return r
 end
 
 function IMAP4.logout(self)
     self.__state = LOGOUT
-    return self:__synchronous_cmd('LOGOUT')
+    return self:__do_cmd('LOGOUT')
 end
 
 function IMAP4.lsub(self, reference, mb_pattern, literals)
@@ -929,11 +953,11 @@ function IMAP4.lsub(self, reference, mb_pattern, literals)
                       literals,
                       { reference or '""', '' },
                       { mb_pattern or '*', '' } )
-    return self:__synchronous_cmd('LSUB', self:__build_arg_str())
+    return self:__do_cmd('LSUB', self:__build_arg_str())
 end
 
 function IMAP4.noop(self)
-    return self:__synchronous_cmd('NOOP')
+    return self:__do_cmd('NOOP')
 end
 
 function IMAP4.rename(self, existing_name, new_name, literals)
@@ -943,7 +967,7 @@ function IMAP4.rename(self, existing_name, new_name, literals)
                         "You must supply an existing mailbox name" },
                       { new_name or '',
                         "You must supply a new name for the mailbox" } )
-    return self:__synchronous_cmd('RENAME', self:__build_arg_str())
+    return self:__do_cmd('RENAME', self:__build_arg_str())
 end
 
 function IMAP4.search(self, criteria, opt_charset, literals)
@@ -956,7 +980,7 @@ function IMAP4.search(self, criteria, opt_charset, literals)
                         "You must specify search criteria" } )
 
     table.insert(self.__argt, 1, {opt_charset or ' ', '', 'C' } )
-    return self:__synchronous_cmd('SEARCH', self:__build_arg_str())
+    return self:__do_cmd('SEARCH', self:__build_arg_str())
 end
 
 function IMAP4.select(self, mb_name, literals)
@@ -964,7 +988,7 @@ function IMAP4.select(self, mb_name, literals)
                       literals,
                       { mb_name or 'INBOX', '' } )
     local mb = self:__build_arg_str()
-    local r = self:__synchronous_cmd('SELECT', mb)
+    local r = self:__do_cmd('SELECT', mb)
     if r:getTaggedResult() == 'OK' then
         self.__state = SELECT
     else
@@ -984,7 +1008,7 @@ function IMAP4.starttls(self)
                 library- please make sure it is installed and visible to the lua
                 interpreter.]])
     end
-    local r = self:__synchronous_cmd('STARTTLS')
+    local r = self:__do_cmd('STARTTLS')
     if r:getTaggedResult() == 'OK' then
         self.__connection:settimeout(nil)
         self.__connection = ssl.wrap(self.__connection, self.__sslparams)
@@ -1006,7 +1030,7 @@ function IMAP4.status(self, mb_name, stat_item, literals)
                       { mb_name or '', 
                        "You must supply a mailbox name when using 'STATUS'" },
                       { stat_item, '', '()' } )
-    return self:__synchronous_cmd('STATUS', self:__build_arg_str())
+    return self:__do_cmd('STATUS', self:__build_arg_str())
 end
 
 function IMAP4.store(self, seq_set, msg_data_item, value, literals)
@@ -1019,7 +1043,7 @@ function IMAP4.store(self, seq_set, msg_data_item, value, literals)
                      { value or '',
                        [[You must supply a value for the message data item when
                        using 'STORE']], '()'} )
-    return self:__synchronous_cmd('STORE', self:__build_arg_str())
+    return self:__do_cmd('STORE', self:__build_arg_str())
 end
 
 function IMAP4.subscribe(self, mb_name, literals)
@@ -1028,7 +1052,7 @@ function IMAP4.subscribe(self, mb_name, literals)
                    { mb_name or '', 
                      "You must supply a mailbox name when using 'SUBSCRIBE'" } )
     local mb_name = self:__build_arg_str()
-    return self:__synchronous_cmd('SUBSCRIBE', mb_name)
+    return self:__do_cmd('SUBSCRIBE', mb_name)
 end
 
 function IMAP4.uid(self, cmd, ...)
@@ -1057,7 +1081,7 @@ function IMAP4.uid(self, cmd, ...)
         end
     end
     table.insert(self.__argt, 1, { cmd, '' } )
-    return self:__synchronous_cmd('UID', self:__build_arg_str())
+    return self:__do_cmd('UID', self:__build_arg_str())
 end
 
 function IMAP4.unsubscribe(self, mb_name, literals)
@@ -1066,7 +1090,7 @@ function IMAP4.unsubscribe(self, mb_name, literals)
                  { mb_name or '', 
                    "You must supply a mailbox name when using 'UNSUBSCRIBE'" } )
     local mb_name = self:__build_arg_str()
-    return self:__synchronous_cmd('UNSUBSCRIBE', mb_name)
+    return self:__do_cmd('UNSUBSCRIBE', mb_name)
 end
 
 function IMAP4.xatom(self, cmd, argstr)
@@ -1082,7 +1106,62 @@ function IMAP4.xatom(self, cmd, argstr)
     -- we'll add the command to the ALLOWED_STATES table as universal, since we
     -- don't have anything else to go on
     ALLOWED_STATES[cmd] = UNIVERSAL
-    return self:__synchronous_cmd(cmd, argstr)
+    return self:__do_cmd(cmd, argstr)
+end
+
+function IMAP4.startPipeline(self)
+    self.__pipeline = true
+end
+
+function IMAP4.endPipeline(self)
+    self:__new_response()
+    assert(self.__connection:send(self.__pipelined_cmds))
+    self.__pipeline = false
+end
+
+function IMAP4.readResponses(self, last_tag)
+    -- the basic logic- return responses that are queued, if none are 
+    -- queued, then read then in from the line until we get a break
+    -- continue doing this until all responses have been returned to caller
+    -- it is implemented as an iterator so responses can be processed in a 
+    -- loop by the caller
+    local response_index = table.getn(self.__responses)
+    return function ()
+               local flags = 0
+               -- since we're 
+               if not response_index then
+                   return nil
+               end
+
+               local r = self.__responses[response_index]
+               local tag = r:getTaggedTag()
+
+               if not tag then
+                   -- don't have completed response in current response
+                   -- so wait for it
+                   while true do
+                       local rtype = self:__get_response(flags)
+                       if not rtype then
+                           if table.getn(self.__responses) > response_index then
+                               tag = r:getTaggedTag()
+                               break
+                           end --if table...
+                       -- check to see if we should generate a new response
+                       -- object
+                       elseif rtype:match(TAG_PAT) then
+                           self:__new_response()
+                           flags = NOWAIT
+                       end --if not rtype...
+                   end --while...
+               end
+
+               if tag == last_tag then
+                   response_index = nil
+               else
+                   response_index = response_index + 1 
+               end --if not tag...
+               return r
+           end
 end
 
 function IMAP4.new(self, hostname, port)
@@ -1095,6 +1174,8 @@ function IMAP4.new(self, hostname, port)
     o.port = port or IMAP4_port
     o.__tagpre = 'a'
     o.__tag_num = 1
+    o.__pipeline = false
+    o.__pipelined_cmds = ''
     o.__responses = {}
     o.__tags = {}
     o.__literals = {}
