@@ -487,6 +487,7 @@ end
 local IMAP4 = {}
 local RECEIVE_SIZE = 4096
 local NOWAIT = 1
+local ANY = 2
 -- The following makes IMAP4 table usable as an object and allows for using the 
 -- IMAP methods as all caps. 
 -- For example: 
@@ -605,30 +606,9 @@ end
 function IMAP4.__get_response(self, flags)
     __debug__("__get_response")
     local resp = self:__readline(flags)
-    if not resp then return nil end
-
-    local r_type, s = self:__get_type(resp)
-    if r_type == '*' then
-        -- untagged response
-        self.__current_response:add_untagged(s)
-        -- check for literal at the end of the response
-        local m = s:match(".*%{(%d+)%}\r\n")
-        if m then 
-            s = self:__read(m)
-            self.__current_response:add_literal(s)
-        end
-    elseif r_type == '+' then
-        -- continuation response
-        self.__current_response:add_continuation(s)
-        return r_type
-    else
-        -- tagged completion
-        if not self.__tags[r_type] then
-            error("Unknown tag from server: "..r_type)
-        end
-        self.__current_response:add_tagged(r_type, s)
+    if not resp then return nil 
+    else return self:__get_type(resp)
     end
-    return r_type
 end
 
 function IMAP4.__buildcmd(self, cmd, args)
@@ -680,6 +660,35 @@ function IMAP4.__send_continuation(self)
     assert(self.__connection:send(out..CRLF))
 end
 
+function IMAP4.__response_handler(self, flags)
+    while true do
+        local r_type, s = self:__get_response(flags)
+        if r_type == '*' then
+            -- untagged response
+            self.__current_response:add_untagged(s)
+            -- check for literal at the end of the response
+            local m = s:match(".*%{(%d+)%}\r\n")
+            if m then 
+                s = self:__read(m)
+                self.__current_response:add_literal(s)
+            end
+        elseif r_type == '+' then
+            -- continuation response
+            self.__current_response:add_continuation(s)
+            self:__send_continuation()
+        elseif r_type then
+            -- tagged completion
+            if not self.__tags[r_type] then
+                error("Unknown tag from server: "..r_type)
+            end
+            self.__current_response:add_tagged(r_type, s)
+            return r_type
+        end
+        -- check if we should return on any response
+        if (r_type and flags == ANY) or flags == NOWAIT then return r_type end
+    end
+end
+
 function IMAP4.__do_cmd(self, cmd, args)
     states = assert(ALLOWED_STATES[cmd], "Invalid command requested: "..cmd)
     assert(states[self.__state], 
@@ -699,13 +708,7 @@ function IMAP4.__do_cmd(self, cmd, args)
     -- synchronous processing mean we sent the command and wait for the result
     self:__new_response()
     self:__send_command(tag, cmd, args)
-    repeat
-        local rtype = self:__get_response()
-        if rtype == '+' then
-            self:__send_continuation()
-        end
-    until rtype == tag
-
+    self:__response_handler()
     return self.__current_response
 end
 
@@ -1120,37 +1123,54 @@ function IMAP4.endPipeline(self)
 end
 
 function IMAP4.readResponses(self, last_tag, first_tag)
-    -- the basic logic- return responses that are queued, if none are 
-    -- queued, then read then in from the line until we get a break
-    -- continue doing this until all responses have been returned to caller
-    -- it is implemented as an iterator so responses can be processed in a 
-    -- loop by the caller
+    --[[
+       When using pipelining, a batch of imap commands are sent at the same
+       time in order to minimize line turnaround.  This method returns an
+       iterator that allows the caller to loop through the responses to the
+       pipelined commands.
+       
+       Arguments: last_tag:  the tag that terminates interation
+
+                  first_tag:  the first tag to start iteration from- allows for
+                              replaying old responses if so desired, or whatever
+                              other use it support, a value of 0 sets it to the
+                              beginning of the responses buffer
+    --]]
     local response_index
     if first_tag then
-        if not self.__tags[first_tag] then
-            error("Invalid tag used in readResponses")
-        end
-        for i, r in ipairs(self.__responses) do
-            if r:getTaggedTag() == first_tag then
-                response_index = i
-                break
+        if first_tag == 0 then response_index = 0
+        else
+            if not self.__tags[first_tag] then
+                error("Invalid tag used in readResponses")
             end
-        end
-        if not response_index then
-            error("Tag not found in __responses.")
+            for i, r in ipairs(self.__responses) do
+                if r:getTaggedTag() == first_tag then
+                    response_index = i
+                    break
+                end
+            end
+            if not response_index then
+                error("Tag not found in __responses.")
+            end
         end
     else
         response_index = table.getn(self.__responses)
     end
 
+    --[[
+        Iterator Function
+        If tagged completion responses exist, then return them, if not then
+        receive responses from the line until there is a break, then resume
+        returning responses.
+    --]]
     return function ()
-               local flags = 0
                -- if we returned the final tag on the previous iteration,
                -- then we're done and response_index will be nil
-               if not response_index then
-                   return nil
-               end
+               if not response_index then return nil end
 
+               local flags = 0 -- if we need to read more data in from the line,
+                               -- make sure we wait for new data, rather than
+                               -- spinning in busywaits.
                local r = self.__responses[response_index]
                local tag = r:getTaggedTag()
 
@@ -1158,7 +1178,7 @@ function IMAP4.readResponses(self, last_tag, first_tag)
                    -- don't have completed response in current response
                    -- so wait for it
                    while true do
-                       local rtype = self:__get_response(flags)
+                       local rtype = self:__response_handler(flags)
                        if not rtype then
                            if table.getn(self.__responses) > response_index then
                                tag = r:getTaggedTag()
@@ -1168,6 +1188,12 @@ function IMAP4.readResponses(self, last_tag, first_tag)
                        -- object
                        elseif rtype:match(TAG_PAT) then
                            self:__new_response()
+                           -- now that we've recieved a completion response, we
+                           -- could return, but won't because there is likely
+                           -- further data on the line.  So we'll continue
+                           -- reading from the line, but as soon as there's a
+                           -- break we'll stop so we can start returning
+                           -- responses to the caller
                            flags = NOWAIT
                        end --if not rtype...
                    end --while...
@@ -1214,22 +1240,22 @@ function IMAP4.new(self, hostname, port)
     -- get greeting
     o:__open_connection()
     o:__new_response()
-    if not o:__get_response() then
+    if not o:__response_handler(ANY) then
         error("No greeting from server "..o.host.." on port "..o.port)
     end
-    o.__welcome = o.__current_response
-    if o.__welcome.__untagged['PREAUTH'] then
+    if o.__current_response.__untagged['PREAUTH'] then
         o.__state = AUTH
-    elseif o.__welcome.__untagged['OK'] then
+    elseif o.__current_response.__untagged['OK'] then
         o.__state = NONAUTH
-    elseif o.__welcome.__untagged['BYE'] then
+    elseif o.__current_response.__untagged['BYE'] then
         error("Connection refused by "..o.host)
     else
         for k,v in pairs(o.__welcome.__untagged) do
             error("Unrecognized greeting: "..k.." "..v[1])
         end
     end
-   
+    o.__welcome = o.__current_response
+
     -- prevents modification of the object once created
     o.__newindex = function(t, k, v) 
                        error("Adding new members to IMAP4 object not allowed")
