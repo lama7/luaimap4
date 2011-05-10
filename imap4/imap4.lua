@@ -486,8 +486,8 @@ end
 --]]
 local IMAP4 = {}
 local RECEIVE_SIZE = 4096
+local MAX_PIPELINE_SIZE = 1000
 local NOWAIT = 1
-local ANY = 2
 -- The following makes IMAP4 table usable as an object and allows for using the 
 -- IMAP methods as all caps. 
 -- For example: 
@@ -587,20 +587,18 @@ function IMAP4.__readline(self, flags)
         exists in the buffer, then read until there is.
     --]]
     local line = ''
-    while #self.__received_data == 0 and not self.__received_data:find(CRLF) do
+    if #self.__received_data == 0 or not self.__received_data:find(CRLF) then
         self:__receive(flags)
-        -- only iterate once if NOWAIT
-        if flags == NOWAIT then break end
     end
 
-    -- if the NOWAIT flag is set, then it's possible that no data is in the 
-    -- buffer, if this is the case, then just return nil otherwise the ensuing
-    -- assignment wacks __received_data because the match returns nil
-    if #self.__received_data == 0 then return nil end
-
-    -- IMAP4 spec states all responses must end in CRLF
-    line, self.__received_data = self.__received_data:match("(.-\r\n)(.*)")
-    return line
+    -- check if there is data to return
+    if #self.__received_data == 0 then 
+        return nil
+    else
+        -- IMAP4 spec states all responses must end in CRLF
+        line, self.__received_data = self.__received_data:match("(.-\r\n)(.*)")
+        return line
+    end
 end
 
 function IMAP4.__get_response(self, flags)
@@ -661,54 +659,99 @@ function IMAP4.__send_continuation(self)
 end
 
 function IMAP4.__response_handler(self, flags)
-    while true do
-        local r_type, s = self:__get_response(flags)
-        if r_type == '*' then
-            -- untagged response
-            self.__current_response:add_untagged(s)
-            -- check for literal at the end of the response
-            local m = s:match(".*%{(%d+)%}\r\n")
-            if m then 
-                s = self:__read(m)
-                self.__current_response:add_literal(s)
-            end
-        elseif r_type == '+' then
-            -- continuation response
-            self.__current_response:add_continuation(s)
-            self:__send_continuation()
-        elseif r_type then
-            -- tagged completion
-            if not self.__tags[r_type] then
-                error("Unknown tag from server: "..r_type)
-            end
-            self.__current_response:add_tagged(r_type, s)
-            return r_type
+    -- this isn't obvious- but r_type can return 1 of 4 values, the three
+    -- explicity checked for here plus 'nil' if get_response doesn't return
+    -- anything useful
+    local r_type, s = self:__get_response(flags)
+    if r_type == '*' then
+        -- untagged response
+        self.__current_response:add_untagged(s)
+        -- check for literal at the end of the response
+        local m = s:match(".*%{(%d+)%}\r\n")
+        if m then 
+            s = self:__read(m)
+            self.__current_response:add_literal(s)
         end
-        -- check if we should return on any response
-        if (r_type and flags == ANY) or flags == NOWAIT then return r_type end
+    elseif r_type == '+' then
+        -- continuation response
+        self.__current_response:add_continuation(s)
+        self:__send_continuation()
+    elseif r_type then
+        -- tagged completion
+        if not self.__tags[r_type] then
+            error("Unknown tag from server: "..r_type)
+        end
+        self.__current_response:add_tagged(r_type, s)
     end
+    return r_type
 end
 
-function IMAP4.__do_cmd(self, cmd, args)
-    states = assert(ALLOWED_STATES[cmd], "Invalid command requested: "..cmd)
+function IMAP4.__do_cmd(self, cmd, args, next_state)
+    local function chk_next_state(r)
+              if r:getTaggedResult() == 'OK' then
+                  self.__state = next_state[1]
+              elseif next_state[2] then
+                  self.__state = next_state[2]
+              end
+          end
+
+    states = ALLOWED_STATES[cmd]
     assert(states[self.__state], 
            "Command '"..cmd.."' not valid in "..self.__state.." state.")
+    local rtype
     local tag = self:__next_tag()
     if self.__pipeline then
         -- Pipelined commands are built up and sent out as one transmission to
         -- the server.  So we'll need to get a tag and build the command as if
         -- we are sending it out, but instead stuff it in a buffer rather than
-        -- transmit it.  As a courtesy to the caller, we'll return the tag and
-        -- the appended command string so they can do process as they see fit
+        -- transmit it.  In this case, return tag of added command
         cmd = self:__buildcmd(cmd, args)
         self.__tags[tag] = cmd
+        -- per RFC2683 limit length to 1000 bytes.  Seems like a number pulled
+        -- out of someone's nether regions, but we'll abide by it.
+        if (#self.__pipelined_cmds + #tag + 1 + #cmd) > MAX_PIPELINE_SIZE then
+            assert(self.__connection:send(self.__pipelined_cmds))
+            self.__pipelined_cmds = ''
+            local flags = 0
+            while true do
+                rtype = self:__response_handler(flags)
+                if not rtype then
+                    break
+                elseif rtype:match(TAG_PAT) then
+                    self:__new_response()
+                    flags = NOWAIT
+                end
+            end
+        end
+        -- now add new command to buffer
         self.__pipelined_cmds = self.__pipelined_cmds..tag..' '..cmd
-        return tag, cmd
+        -- check if we've just added a literal- if so then we need to handle it
+        -- now
+        if self.__pipelined_cmds:match(".*%{%d+%}\r\n$") or next_state then
+            assert(self.__connection:send(self.__pipelined_cmds))
+            self.__pipelined_cmds = ''
+            while true do
+                rtype = self:__response_handler()
+                -- create a new response object on every tagged completion
+                -- response
+                if rtype:match(TAG_PAT) then
+                    if rtype == tag then break
+                    else self:__new_response()
+                    end
+                end
+            end
+            if next_state then chk_next_state(self.__current_response) end
+        end
+        return tag
     end
-    -- synchronous processing mean we sent the command and wait for the result
+    -- synchronous processing means we sent the command and wait for the result
     self:__new_response()
     self:__send_command(tag, cmd, args)
-    self:__response_handler()
+    -- for synchronous commands, wait for the tagged completion response
+    repeat
+        rtype = self:__response_handler()
+    until rtype == tag
+    if next_state then chk_next_state(self.__current_response) end
     return self.__current_response
 end
 
@@ -853,9 +896,7 @@ function IMAP4.authenticate(self, auth_mech, argt)
                               "Authorization type not supported.")
     self.__literal_func = auth_func(argt)
 
-    local r = self:__do_cmd('AUTHENTICATE', " "..auth_mech)
-    if r:getTaggedResult() == 'OK' then self.__state = AUTH end
-    return r
+    return self:__do_cmd('AUTHENTICATE', " "..auth_mech, {AUTH})
 end
 
 function IMAP4.capability(self)
@@ -867,9 +908,7 @@ function IMAP4.check(self)
 end
 
 function IMAP4.close(self)
-    local r = self:__do_cmd('CLOSE')
-    if r:getTaggedResult() == 'OK' then self.__state = AUTH end
-    return r
+    return self:__do_cmd('CLOSE', nil, {AUTH})
 end
 
 function IMAP4.copy(self, seq_set, mb_name, literals)
@@ -905,13 +944,7 @@ function IMAP4.examine(self, mb_name, literals)
                       literals,
                       { mb_name or 'INBOX', '' } )
     local mb = self:__build_arg_str()
-    local r = self:__do_cmd('EXAMINE', mb)
-    if r:getTaggedResult() == 'OK' then
-        self.__state = SELECT
-    else
-        self.__state = AUTH
-    end
-    return r
+    return self:__do_cmd('EXAMINE', mb, {SELECT, AUTH})
 end
 
 function IMAP4.expunge(self)
@@ -941,9 +974,7 @@ function IMAP4.login(self, user, pw, literals)
                    { user or '', "You must supply a username to login with." },
                    { pw or '', "You must supply a password to login with. " })
     args = self:__build_arg_str()
-    local r = self:__do_cmd('LOGIN', args)
-    if r:getTaggedResult() == 'OK' then self.__state = AUTH end
-    return r
+    return self:__do_cmd('LOGIN', args, {AUTH})
 end
 
 function IMAP4.logout(self)
@@ -990,14 +1021,7 @@ function IMAP4.select(self, mb_name, literals)
     self:__check_args({'mb_name'},
                       literals,
                       { mb_name or 'INBOX', '' } )
-    local mb = self:__build_arg_str()
-    local r = self:__do_cmd('SELECT', mb)
-    if r:getTaggedResult() == 'OK' then
-        self.__state = SELECT
-    else
-        self.__state = AUTH
-    end    
-    return r
+    return self:__do_cmd('SELECT', self:__build_arg_str(), {SELECT, AUTH})
 end
 
 function IMAP4.shutdown(self)
@@ -1114,11 +1138,13 @@ end
 
 function IMAP4.startPipeline(self)
     self.__pipeline = true
+    self:__new_response() -- stage a response object when pipeline is sent
+    self.__pipeline_index_start = #self.__responses
 end
 
 function IMAP4.endPipeline(self)
-    self:__new_response()
     assert(self.__connection:send(self.__pipelined_cmds))
+    self.__pipelined_cmds = ''
     self.__pipeline = false
 end
 
@@ -1154,7 +1180,7 @@ function IMAP4.readResponses(self, last_tag, first_tag)
             end
         end
     else
-        response_index = table.getn(self.__responses)
+        response_index = self.__pipeline_index_start
     end
 
     --[[
@@ -1180,7 +1206,7 @@ function IMAP4.readResponses(self, last_tag, first_tag)
                    while true do
                        local rtype = self:__response_handler(flags)
                        if not rtype then
-                           if table.getn(self.__responses) > response_index then
+                           if #self.__responses > response_index then
                                tag = r:getTaggedTag()
                                break
                            end --if table...
@@ -1207,6 +1233,14 @@ function IMAP4.readResponses(self, last_tag, first_tag)
                    response_index = nil
                else
                    response_index = response_index + 1 
+                   -- EDGE CASE: possible that on entry exactly 1 completed
+                   -- response is waiting (literal as first entry in pipeline,
+                   -- or state change command as first entry in pipeline).  In
+                   -- this case, make sure that responses table is as long
+                   -- as response_index- should only ever be off by 1
+                   if response_index > #self.__responses then
+                       self:__new_response()
+                   end
                end --if not tag...
                return r
            end
@@ -1224,6 +1258,7 @@ function IMAP4.new(self, hostname, port)
     o.__tag_num = 1
     o.__pipeline = false
     o.__pipelined_cmds = ''
+    o.__pipeline_index_start = 0
     o.__responses = {}
     o.__tags = {}
     o.__literals = {}
@@ -1240,7 +1275,7 @@ function IMAP4.new(self, hostname, port)
     -- get greeting
     o:__open_connection()
     o:__new_response()
-    if not o:__response_handler(ANY) then
+    if not o:__response_handler() then
         error("No greeting from server "..o.host.." on port "..o.port)
     end
     if o.__current_response.__untagged['PREAUTH'] then

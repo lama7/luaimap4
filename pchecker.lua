@@ -84,7 +84,7 @@ imap:endPipeline()
 
 for r in imap:readResponses(lasttag) do
     local mbstat = r:getUntaggedContent('STATUS')[1] 
-    local mb, newmail = mbstat:match([[^%"(.-)%"%s+%(UNSEEN (%d+)%)$]])
+    local mb, newmail = mbstat:match([[^%"(.-)%"%s+%(UNSEEN (%d+)%)]])
     if newmail ~= '0' then
         print(string.format("\t%s:\t%u", mb, newmail))
     end
