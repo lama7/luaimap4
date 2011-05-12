@@ -727,7 +727,7 @@ function IMAP4.__do_cmd(self, cmd, args, next_state)
         self.__pipelined_cmds = self.__pipelined_cmds..tag..' '..cmd
         -- check if we've just added a literal- if so then we need to handle it
         -- now
-        if self.__pipelined_cmds:match(".*%{%d+%}\r\n$") or next_state then
+        if next_state or cmd:find(".*%{%d+%}\r\n$") then
             assert(self.__connection:send(self.__pipelined_cmds))
             self.__pipelined_cmds = ''
             while true do
