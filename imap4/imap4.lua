@@ -377,7 +377,13 @@ function Response.getUntaggedContent(self, typ)
     end
     local ret_t = {}
     for i,v in ipairs(self.__untagged[typ]) do
-        table.insert(ret_t, v[1])
+        if v[1] == '' and v[2] ~= nil then
+            table.insert(ret_t, v[2])
+        elseif v[2] ~= nil then
+            table.insert(ret_t, v)
+        else 
+            table.insert(ret_t, v[1])
+        end
     end
     return ret_t
 end
