@@ -78,6 +78,7 @@ local __debug__ = function() end
 --]]
 local CRLF = "\r\n"
 local IMAP4_port = 143
+local IMAP4_SSL_port = 993
 
 local IMAP4_states = { "NOT_AUTHENTICATED", "AUTHENTICATED", "SELECTED", "LOGOUT"}
 local NONAUTH = IMAP4_states[1]
@@ -510,9 +511,13 @@ IMAP4.__index = function (t,k)
     PRIVATE METHODS
 
 --]]
-function IMAP4.__open_connection(self)
+function IMAP4.__open_connection(self, ssl_proto)
     self.__connection = assert(socket.connect(self.host, self.port), 
                                'Unable to establish connection with host.\r\n')
+    if ssl_proto ~= 'tlsv1' then
+        self.__connection = ssl.wrap(self.__connection, self.__sslparams)
+        assert(self.__connection:dohandshake())
+    end
     self.__connection:settimeout(0)
 end
 
@@ -1252,14 +1257,23 @@ function IMAP4.readResponses(self, last_tag, first_tag)
            end
 end
 
-function IMAP4.new(self, hostname, port)
+function IMAP4.new(self, hostname, port, ssl_proto)
     -- the following 'magic' lines make this usable as an object
     local o = {}
     setmetatable(o, self)
 
     -- now handle object initialization
     o.host = hostname or 'localhost'
-    o.port = port or IMAP4_port
+    if ssl_proto == nil or ssl_proto:lower() == 'none' then
+        ssl_proto = 'tlsv1'
+        o.port = port or IMAP4_port
+    elseif ssl_proto == 'tlsv1' or 
+           ssl_proto == 'sslv23' or
+           ssl_proto == 'sslv3' then
+        o.port = port or IMAP4_SSL_port
+    else
+        error("Invalid ssl_proto value: "..ssl_proto)
+    end
     o.__tagpre = 'a'
     o.__tag_num = 1
     o.__pipeline = false
@@ -1272,14 +1286,11 @@ function IMAP4.new(self, hostname, port)
     o.__received_data = ''
     o.__sslparams = {
                      mode = "client",
-                     protocol = "tlsv1",
+                     protocol = ssl_proto
                     }
-    o.__connection = assert(socket.connect(o.host, o.port), 
-                            'Unable to establish connection with host.\r\n')
-    o.__connection:settimeout(0)
     
     -- get greeting
-    o:__open_connection()
+    o:__open_connection(ssl_proto)
     o:__new_response()
     if not o:__response_handler() then
         error("No greeting from server "..o.host.." on port "..o.port)
