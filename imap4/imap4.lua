@@ -511,10 +511,10 @@ IMAP4.__index = function (t,k)
     PRIVATE METHODS
 
 --]]
-function IMAP4.__open_connection(self, ssl_proto)
+function IMAP4.__open_connection(self)
     self.__connection = assert(socket.connect(self.host, self.port), 
                                'Unable to establish connection with host.\r\n')
-    if ssl_proto ~= 'tlsv1' then
+    if self.__sslparams.protocol ~= 'tlsv1' then
         self.__connection = ssl.wrap(self.__connection, self.__sslparams)
         assert(self.__connection:dohandshake())
     end
@@ -1257,22 +1257,21 @@ function IMAP4.readResponses(self, last_tag, first_tag)
            end
 end
 
-function IMAP4.new(self, hostname, port, ssl_proto)
+function IMAP4.new(self, hostname, port, ssl_opts)
     -- the following 'magic' lines make this usable as an object
     local o = {}
     setmetatable(o, self)
 
+    if not ssl_opts then ssl_opts = {} end
     -- now handle object initialization
     o.host = hostname or 'localhost'
-    if ssl_proto == nil or ssl_proto:lower() == 'none' then
-        ssl_proto = 'tlsv1'
+    if not ssl_opts.protocol or ssl_opts.protocol == 'tlsv1' then
         o.port = port or IMAP4_port
-    elseif ssl_proto == 'tlsv1' or 
-           ssl_proto == 'sslv23' or
-           ssl_proto == 'sslv3' then
+    elseif ssl_opts.protocol == 'sslv23' or
+           ssl_opts.protocol == 'sslv3' then
         o.port = port or IMAP4_SSL_port
     else
-        error("Invalid ssl_proto value: "..ssl_proto)
+        error("Invalid ssl_proto value: "..ssl_opts.protocol)
     end
     o.__tagpre = 'a'
     o.__tag_num = 1
@@ -1286,11 +1285,11 @@ function IMAP4.new(self, hostname, port, ssl_proto)
     o.__received_data = ''
     o.__sslparams = {
                      mode = "client",
-                     protocol = ssl_proto
+                     protocol = ssl_opts.protocol or 'tlsv1'
                     }
     
     -- get greeting
-    o:__open_connection(ssl_proto)
+    o:__open_connection()
     o:__new_response()
     if not o:__response_handler() then
         error("No greeting from server "..o.host.." on port "..o.port)
