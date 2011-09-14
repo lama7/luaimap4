@@ -627,6 +627,23 @@ function IMAP4.__buildcmd(self, cmd, args)
     return cmdstr..CRLF
 end
 
+function IMAP4.__handle_argflag(self, arg, flag)
+    if flag == 'l' then 
+        table.insert(self.__literals, arg)
+        return nil
+    elseif flag == '()' then 
+        arg = '('..arg..')' 
+    elseif flag == 'C' then
+        arg = 'CHARSET '..arg
+    -- these are atom-special characters as defined by RFC3501,
+    -- if any of them are in the arg string,then quote the string
+    elseif not arg:find([[^".*"$]]) and arg:find("[ {\"%c%(%)%%%*%]]") then
+        arg = '"'..arg..'"'
+    end
+
+    return arg
+end
+
 function IMAP4.__send_command(self, tag, cmd, args)
     self.__tags[tag] = self:__buildcmd(cmd, args)
     assert(self.__connection:send(tag..' '..self.__tags[tag]))
@@ -655,11 +672,8 @@ function IMAP4.__send_continuation(self)
                 table.remove(self.__argt, 1)
             until arg ~= ' ' 
             if arg ~= '' then
-                if flag ~= 'l' then
-                    out = out.." "..arg 
-                else   
-                    table.insert(self.__literals, arg)
-                end
+                arg = self:__handle_argflag(arg, flag)
+                if arg then out = out.." "..arg end
             end
         end
         -- be sure to add length of next literal if there are subsequent
@@ -845,19 +859,12 @@ function IMAP4.__build_arg_str(self)
         if arg ~= ' ' then 
             if arg ~= '' then  -- check if arg is being sent as literal
                 -- now process argument flags- these modify the arguments to
-                -- handle the idicosynchracies of certain command arguments.
+                -- handle the idiosynchracies of certain command arguments.
                 -- For instance, the APPEND command takes a literal as its 2nd
                 -- argument so if it is passed in a as a normal named argument
                 -- it must still go out as a literal
-                if flag == 'l' then 
-                    table.insert(self.__literals, arg)
-                    arg_str = arg_str..' '..self:__add_literal()
-                    break
-                elseif flag == '()' then 
-                    arg = '('..arg..')' 
-                elseif flag == 'C' then
-                    arg = 'CHARSET '..arg
-                end
+                arg = self:__handle_argflag(arg, flag)
+                if not arg then break end
                 arg_str = arg_str..' '..arg
             elseif #self.__literals ~= 0 then
                 arg_str = arg_str..' '..self:__add_literal()
@@ -968,7 +975,8 @@ function IMAP4.fetch(self, seq_set, data, literals)
                       {seq_set or '',
                        "You must provide a sequence set to fetch"},
                       {data or '',
-                       "You must provide data times to fetch from messages" } )
+                       "You must provide data times to fetch from messages",
+                       '()' } )
     return self:__do_cmd('FETCH', self:__build_arg_str())
 end
 

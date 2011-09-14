@@ -48,6 +48,7 @@ local string = require("string")
 function chk_result(r)
     if r:getTaggedResult() ~= 'OK' then
         imap:shutdown()
+        r:__print()
         error("Imap command failed")
     end
     return r
