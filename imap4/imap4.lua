@@ -857,7 +857,10 @@ function IMAP4.__build_arg_str(self)
         -- check if this is an optional argument that should NOT be used as a
         -- literal, do nothing if so
         if arg ~= ' ' then 
-            if arg ~= '' then  -- check if arg is being sent as literal
+            if arg == '' then  -- check if arg is being sent as literal
+                break
+            else
+                -- not a literal...
                 -- now process argument flags- these modify the arguments to
                 -- handle the idiosynchracies of certain command arguments.
                 -- For instance, the APPEND command takes a literal as its 2nd
@@ -866,11 +869,11 @@ function IMAP4.__build_arg_str(self)
                 arg = self:__handle_argflag(arg, flag)
                 if not arg then break end
                 arg_str = arg_str..' '..arg
-            elseif #self.__literals ~= 0 then
-                arg_str = arg_str..' '..self:__add_literal()
-                break
             end
         end
+    end
+    if #self.__literals ~= 0 then
+        arg_str = arg_str..' '..self:__add_literal()
     end
     return arg_str
 end
@@ -977,6 +980,13 @@ function IMAP4.fetch(self, seq_set, data, literals)
                       {data or '',
                        "You must provide data times to fetch from messages",
                        '()' } )
+    -- per RFC3501, the fetch command has 3 macros: ALL, FAST, FULL and these 
+    -- must be the only value and should not be sent in parens
+    MACROS = { ['ALL'] = 1, ['FAST'] = 1, ['FULL'] = 1 }
+    if data and MACROS[data] then
+        -- modify the 'flag' field in the table
+        self.__argt[2][3] = nil
+    end
     return self:__do_cmd('FETCH', self:__build_arg_str())
 end
 
