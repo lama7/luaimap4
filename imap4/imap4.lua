@@ -939,7 +939,7 @@ function IMAP4.copy(self, seq_set, mb_name, literals)
                         "You must supply a sequence set when using 'COPY'" },
                       { mb_name or '',
                         "You must supply a mailbox name when using 'COPY'" } )
-    return self:__do_cmd('COPY', self:_build_arg_str())
+    return self:__do_cmd('COPY', self:__build_arg_str())
 end
 
 function IMAP4.create(self, mb_name, literals)
