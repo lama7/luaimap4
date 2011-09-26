@@ -1129,7 +1129,8 @@ function IMAP4.uid(self, cmd, ...)
         self.__argt[2] = { argt[2], '' }
     else
         for i,v in ipairs(argt) do
-            if cmd == 'STORE' and i == 3 then
+            if (cmd == 'STORE' and i == 3) or
+               (cmd == 'FETCH' and i == 2) then
                 self.__argt[i] = { v, '', '()' }
             else
                 self.__argt[i] = { v, '' }
