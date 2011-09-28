@@ -637,7 +637,9 @@ function IMAP4.__handle_argflag(self, arg, flag)
         arg = 'CHARSET '..arg
     -- these are atom-special characters as defined by RFC3501,
     -- if any of them are in the arg string,then quote the string
-    elseif not arg:find([[^".*"$]]) and arg:find("[ {\"%c%(%)%%%*%]]") then
+    elseif flag ~= "NQ" and
+           not arg:find([[^".*"$]]) and 
+           arg:find("[ {\"%c%(%)%%%*%]]") then
         arg = '"'..arg..'"'
     end
 
@@ -936,7 +938,8 @@ function IMAP4.copy(self, seq_set, mb_name, literals)
     self:__check_args({ 'seq_set', 'mb_name' },
                       literals,
                       { seq_set or '',
-                        "You must supply a sequence set when using 'COPY'" },
+                        "You must supply a sequence set when using 'COPY'",
+                        "NQ" },
                       { mb_name or '',
                         "You must supply a mailbox name when using 'COPY'" } )
     return self:__do_cmd('COPY', self:__build_arg_str())
@@ -976,7 +979,8 @@ function IMAP4.fetch(self, seq_set, data, literals)
     self:__check_args({'seq_set', 'data'},
                       literals,
                       {seq_set or '',
-                       "You must provide a sequence set to fetch"},
+                       "You must provide a sequence set to fetch",
+                       "NQ"},
                       {data or '',
                        "You must provide data times to fetch from messages",
                        '()' } )
@@ -1093,7 +1097,8 @@ function IMAP4.store(self, seq_set, msg_data_item, value, literals)
     self:__check_args({ 'seq_set', 'msg_data_item', 'value' },
                       literals,
                       { seq_set or '',
-                        "You must supply a sequence set when using 'STORE'" },
+                        "You must supply a sequence set when using 'STORE'",
+                        "NQ" },
                    { msg_data_item or '',
                      "You must supply a message data item when using 'STORE'" },
                      { value or '',
