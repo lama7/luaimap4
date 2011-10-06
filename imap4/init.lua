@@ -48,6 +48,7 @@ end
 -- decided to put everything under an 'imap4' directory.
 package.preload['auth'] = loader
 package.preload['utils'] = loader
+package.preload['parser'] = loader
 
 -- All of this is kicked off by someone using "local imaplib = require("imap4")"
 -- in their source code.

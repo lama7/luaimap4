@@ -143,6 +143,7 @@ append_cmds =
   { [[append bar "2-OCT-2011 21:44:32 -0006" {1024}]], false },
   { [[append bar "02-OCT-2011 21:44:32 -006" {1024}]], false },
   { [[append spam (\Seen) {200} ]], false },
+  { [[APPEND test2 (Deleted Seen) {304}]], true },
 }
 test(append_cmds)
 
@@ -166,6 +167,7 @@ fetch_cmds =
   { [[fetch 2:4 FLAGS BODY[HEADER.FIELDS (DATE FROM)]<2.4>]], false },
   { "fetch 1:* BODY[HEADER.FIELDS (DATE FROM SUBJECT)]", true },
   { "fetch 1:* BODY[HEADER.FIELDS (DATE FROM SUBJECT)]<5.10>", true },
+  { [[fetch 4 (BODY[TEXT])]], true },
 }
 test(fetch_cmds)
 

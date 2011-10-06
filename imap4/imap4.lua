@@ -67,6 +67,7 @@ end
 local ssl = require("ssl")
 local auth = require("auth")
 local utils = require("utils")
+-- local cp = require("parser")
 
 --local __debug__ = print
 local __debug__ = function() end
@@ -624,6 +625,9 @@ function IMAP4.__buildcmd(self, cmd, args)
     local cmdstr = ''
     if args then cmdstr = cmd..args
     else cmdstr = cmd end
+    if self.__checksyntax and not self.__checksyntax(cmdstr) then
+        error("Invalid IMAP syntax:  '"..cmdstr.."'")
+    end
     return cmdstr..CRLF
 end
 
@@ -1167,6 +1171,7 @@ function IMAP4.xatom(self, cmd, argstr)
     end
     -- we'll add the command to the ALLOWED_STATES table as universal, since we
     -- don't have anything else to go on
+    cmd = 'X'..cmd
     ALLOWED_STATES[cmd] = UNIVERSAL
     return self:__do_cmd(cmd, argstr)
 end
@@ -1281,7 +1286,7 @@ function IMAP4.readResponses(self, last_tag, first_tag)
            end
 end
 
-function IMAP4.new(self, hostname, port, ssl_opts)
+function IMAP4.new(self, hostname, port, ssl_opts, options)
     -- the following 'magic' lines make this usable as an object
     local o = {}
     setmetatable(o, self)
@@ -1330,6 +1335,12 @@ function IMAP4.new(self, hostname, port, ssl_opts)
         end
     end
     o.__welcome = o.__current_response
+    -- now process options 
+    if options then
+        if options.syntaxchecking then
+            o.__checksyntax = require("parser").parse
+        end
+    end
 
     -- prevents modification of the object once created
     o.__newindex = function(t, k, v) 

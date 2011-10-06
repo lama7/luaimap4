@@ -11,7 +11,7 @@ local imaplib = require("imap4")
 
 local message = "Date: Mon, 7 Feb 1994 21:52:25 -0800 (PST)\r\nFrom: Fred Foobar<foobar@Blurdybloop.COM>\r\nSubject: afternoon meeting\r\nTo:mooch@owatagu.siam.edu\r\nMessage-Id:<B27397-0100000@Blurdybloop.COM>\r\nMIME-Version: 1.0\r\nContent-Type:TEXT/PLAIN; CHARSET=US-ASCII\r\n\r\nHello Joe, do you think we can meet at 3:30 tomorrow?"
 
-local imap = imaplib.IMAP4:new(arg[1])
+local imap = imaplib.IMAP4:new(arg[1], nil, nil, { syntaxchecking = true })
 imap.__welcome:__print()
 local r = imap:capability()
 r:__print()

@@ -1,8 +1,52 @@
+--[[
+Copyright (c) <2011> <Gerry LaMontagne>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+--]]
+
+--[[
+    author: Gerry LaMontagne
+    date created: 10/2011
+
+    This is a syntax checker for IMAP4rev1 commands.  It consists of a lexing
+    object, a parsing table with entries for all commands defined in RFC3501 and
+    a command_parse function that is exported to kickoff parsing a command
+    string.
+
+    The syntax parser only parses the command portion excluding the tag and the
+    closing CRLF.  It was done this way because adding the tag and CRLF is a 
+    trivial step, while building the command can be difficult.  It is meant as a
+    development aid when using the library so that improper syntax is brought to
+    the developer's attention quickly, so they don't waste time chasing their
+    tail about whether the command is reaching the server, or why the server is
+    rejecting the command.
+
+    BTW- read RFC3501.  Can't mention that enough.
+
+    Also, because this is meant solely as a syntax checker, things like
+    precedence are not taken into account.  I don't believe that causes any
+    issues, but if they do I'll rectify them at that time.
+--]]
+
 local string = require('string')
 local table = require('table')
 
 local SP = ' '
-local CRLF = '\r\n'
 -- The following are all per RFC3501
 local LIST_WILDCARDS = "%%%*"
 local QUOTED_SPECIALS = [["\]]
@@ -390,7 +434,7 @@ local function parseStatusAtt(l)
     if t[1] ~= '(' then return false end
     while true do
         t = l:token()
-        if not lex.status[t[1]] then return false end
+        if not lex.status[t[1]:lower()] then return false end
         t = l:token()
         if t[1] == ')' then break end
         if t[1] ~= 'space' then return false end
@@ -416,7 +460,6 @@ local function parseFlags(l)
     -- check for flag-keyword case
     if pt[1] ~= '\\' then
         if not parseAtom(l) then return false end
-        l:token()
     else
         l:token() -- "pop" the '\'
         -- must be a defined flag or a flag-extension
@@ -547,7 +590,10 @@ local function parseSection(l)
 --]]
     local function pSectionMsgText(l)
         local t = l:peek()
-        if t[1]:lower() == 'text' then return true end
+        if t[1]:lower() == 'text' then
+            l:token()
+            return true 
+        end
         if t[1]:lower() ~= 'header' then return false end
         l:token()
         t = l:peek()
@@ -830,7 +876,7 @@ local command =
                  end,
     ['CREATE'] = parse1Arg(parseMailbox),
     ['DELETE'] = parse1Arg(parseMailbox),
-    ['EXAMINE'] = parse1Arg(parseMailboxtrue),
+    ['EXAMINE'] = parse1Arg(parseMailbox),
     ['LIST'] = parseList,
     ['LSUB'] = parseList,
     ['RENAME'] = parse2ArgsWithLiterals(parseMailbox, parseMailbox),
@@ -870,7 +916,7 @@ setmetatable(command,
                                        while l:peek() do
                                          my_t = l:token()
                                        end
-                                       return my_t[2] ~= 'space'
+                                       return not my_t or my_t[2] ~= 'space'
                                      end
                             else
                               return uid_commands[k]
@@ -879,7 +925,7 @@ setmetatable(command,
              }
             )
 
-local function command_parse(imapcmd)
+local function parse(imapcmd)
 --[[
     Entry point for parsing a command.
     The parameter should consist of the everything except the tag and space
@@ -899,6 +945,6 @@ local function command_parse(imapcmd)
 end
 
 -- export parse function
-parser = { command_parse = command_parse
+parser = { parse = parse
          }
 return parser
