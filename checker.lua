@@ -75,7 +75,8 @@ print("Checking for new mail...")
 r = chk_result(imap:LIST('""', '*'))
 newmail = {}
 for i,v in ipairs(r:getUntaggedContent('LIST')) do
-    local mb = v:match([[.* %"(.-)%"$]])
+--    local mb = v:match([[.* %"(.-)%"$]])
+    local mb = v:match([[.* (.-)$]])
     local rs = chk_result(imap:STATUS(mb, 'UNSEEN'))
     local mbstat = rs:getUntaggedContent('STATUS')[1] 
     local newmail = mbstat:match([[%(UNSEEN (%d+)%)$]])

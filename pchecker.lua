@@ -76,7 +76,7 @@ local firsttag
 local lasttag
 imap:startPipeline()
 for i,v in ipairs(r:getUntaggedContent('LIST')) do
-    local mb = v:match([[.* %"(.-)%"$]])
+    local mb = v:match([[.* (.-)$]])
     lasttag = imap:STATUS(mb, 'UNSEEN')
     if i == 1 then firsttag = lasttag end
 end
@@ -84,7 +84,7 @@ imap:endPipeline()
 
 for r in imap:readResponses(lasttag) do
     local mbstat = r:getUntaggedContent('STATUS')[1] 
-    local mb, newmail = mbstat:match([[^%"(.-)%"%s+%(UNSEEN (%d+)%)]])
+    local mb, newmail = mbstat:match([[^(.-)%s+%(UNSEEN (%d+)%)]])
     if newmail ~= '0' then
         print(string.format("\t%s:\t%u", mb, newmail))
     end
@@ -93,7 +93,7 @@ end
 -- now repeat using firsttag
 for r in imap:readResponses(lasttag, firsttag) do
     local mbstat = r:getUntaggedContent('STATUS')[1] 
-    local mb, newmail = mbstat:match([[^%"(.-)%"%s+%(UNSEEN (%d+)%)$]])
+    local mb, newmail = mbstat:match([[^(.-)%s+%(UNSEEN (%d+)%)$]])
     if newmail ~= '0' then
         print(string.format("\t%s:\t%u", mb, newmail))
     end
