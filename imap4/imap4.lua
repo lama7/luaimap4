@@ -582,7 +582,7 @@ function IMAP4.__readline(self, flags)
         exists in the buffer, then read until there is.
     --]]
     local line = ''
-    if #self.__received_data == 0 or not self.__received_data:find(CRLF) then
+    while (#self.__received_data == 0 or not self.__received_data:find(CRLF)) do
         self:__receive(flags)
     end
 
