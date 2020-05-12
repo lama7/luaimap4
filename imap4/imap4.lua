@@ -141,8 +141,7 @@ local RESPONSE_UNTAGGED = "^(%*) "
 local RESPONSE_CONTINUE = "^(%+) "
 local RESPONSE_TAGGED = "^(%a%d+) "
 local RESPONSE_TYPES_PAT = {RESPONSE_UNTAGGED, RESPONSE_CONTINUE, RESPONSE_TAGGED}
-local RESPONSE_PAT1 = "^(%u+) (.*)\r\n"
-local RESPONSE_PAT2 = "^(%d+) (%u+) ?(.*)\r\n"
+local RESPONSE_PAT1 = "^(%u+) ?(.*)\r\n"
 
 --[[
     Response Object
@@ -250,10 +249,11 @@ function Response.add_untagged(self, data)
     __debug__("Response.add_untagged:")
     __debug__(data)
     local ut = self.__untagged
-    local msg_num, typ, content = data:match(RESPONSE_PAT2)
-    if not msg_num then
-        typ, content = data:match(RESPONSE_PAT1)
-    end
+    -- check if there is a msg number at the beginning of the response, if so
+    -- strip it and then look for the msg type and grab that and the content
+    local msg_num, content = data:match("^(%d+) (.*\r\n)")
+    if msg_num then data = content end
+    typ, content = data:match(RESPONSE_PAT1)
     if not ut[typ] then ut[typ] = {} end
     if not content then content = '' end
     table.insert(ut[typ], { content, msg_num })
@@ -582,12 +582,15 @@ function IMAP4.__readline(self, flags)
         exists in the buffer, then read until there is.
     --]]
     local line = ''
-    while (#self.__received_data == 0 or not self.__received_data:find(CRLF)) do
-        self:__receive(flags)
+    -- if no data, then do a read
+    if (#self.__received_data == 0 or not self.__received_data:find(CRLF) ) then
+        self:__receive(flags) 
     end
 
     -- check if there is data to return
-    if #self.__received_data == 0 then 
+    -- data returned MUST be CRLF terminated, otherwise we don't have the
+    -- complete response from the server
+    if #self.__received_data == 0 or not self.__received_data:find(CRLF) then 
         return nil
     else
         -- IMAP4 spec states all responses must end in CRLF
